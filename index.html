@@ -176,6 +176,7 @@ const firebaseConfig = {
 };
 const FB = 'https://www.gstatic.com/firebasejs/11.10.0';
 const AI_MODEL = 'gemini-3.8-flash';
+const AI_FALLBACK = 'gemini-3.5-flash-lite'; // 主模型忙碌時的備援
 const firebaseConfigured = () => !String(firebaseConfig.apiKey).startsWith('YOUR_') && !String(firebaseConfig.projectId).startsWith('YOUR_');
 
 // ---- 小工具 ----
@@ -639,8 +640,21 @@ async function initAI(app) {
   try {
     const m = await import(`${FB}/firebase-ai.js`);
     const inst = m.getAI(app, { backend: new m.GoogleAIBackend() });
-    ai = { chat: m.getGenerativeModel(inst, { model: AI_MODEL, systemInstruction: SYS }), json: m.getGenerativeModel(inst, { model: AI_MODEL, generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }) };
+    const make = model => ({ chat: m.getGenerativeModel(inst, { model, systemInstruction: SYS }), json: m.getGenerativeModel(inst, { model, generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }) });
+    ai = { models: [make(AI_MODEL), make(AI_FALLBACK)] };
   } catch (e) { console.warn('AI Logic 無法載入', e); }
+}
+// 主模型忙碌（500/503/429）時自動重試一次，再改用備援模型
+async function aiCall(kind, req) {
+  const busy = e => /\[(500|503|429)|high demand|overloaded|UNAVAILABLE|RESOURCE_EXHAUSTED/i.test(String(e?.message || e));
+  let last;
+  for (const [i, mdl] of ai.models.entries()) {
+    for (let t = 0; t < (i === 0 ? 2 : 1); t++) {
+      try { return (await mdl[kind].generateContent(req)).response.text(); }
+      catch (e) { last = e; if (!busy(e)) throw e; await new Promise(r => setTimeout(r, 1200)); }
+    }
+  }
+  throw last;
 }
 function aiReady() {
   if (!firebaseConfigured()) { addMsg('bot', 'AI 小幫手需要先設定 Firebase（見 README）。'); return false; }
@@ -654,6 +668,7 @@ function aiErr(e) {
   const detail = `\n\n（錯誤代碼：${code || e?.code || '未知'}｜${s.replace(/https?:\/\/\S+/g, '').slice(0, 160)}）`;
   if (/app.?check/i.test(s)) return 'AI 請求被 App Check 擋下：請到 Firebase → App Check → API，把 Firebase AI Logic 設為「未強制執行」，等幾分鐘再試。' + detail;
   if (code === '429' || /quota|RESOURCE_EXHAUSTED/i.test(s)) return '目前 AI 使用量已達上限，請稍等一下再試。' + detail;
+  if (/high demand|overloaded|UNAVAILABLE/i.test(s) || code === '500' || code === '503') return 'Gemini 現在使用的人太多，有點塞車，過幾秒再按一次試試。' + detail;
   if (/has not been used|is disabled|SERVICE_DISABLED|api-not-enabled/i.test(s)) return 'Firebase 專案的 AI Logic API 尚未啟用或剛啟用，請到 Firebase → AI Logic 確認，等幾分鐘再試。' + detail;
   if (/API_KEY|api key|referer|blocked/i.test(s)) return 'API 金鑰被限制，無法呼叫 AI Logic。請到 Google Cloud Console → API 和服務 → 憑證，檢查 Browser key 的 API 限制。' + detail;
   if (code === '404') return '找不到指定的 AI 模型。' + detail;
@@ -690,7 +705,7 @@ async function askAI(text) {
   const typing = addMsg('bot', '思考中…', true); aiBusy = true;
   try {
     const contents = [...aiHistory.slice(-6), { role: 'user', parts: [{ text: `${aiContext()}\n\n使用者：${text}` }] }];
-    const out = (await ai.chat.generateContent({ contents })).response.text();
+    const out = await aiCall('chat', { contents });
     typing.remove(); addMsg('bot', out);
     aiHistory.push({ role: 'user', parts: [{ text }] }, { role: 'model', parts: [{ text: out }] });
   } catch (e) { typing.remove(); addMsg('bot', aiErr(e)); }
@@ -714,7 +729,7 @@ async function quickAdd(text) {
 - category：學習、工作、個人、生活、健康、社團 擇一
 - note：其他補充，可為空字串
 使用者輸入：${text}`;
-    const raw = (await ai.json.generateContent(prompt)).response.text().replace(/```json|```/g, '').trim();
+    const raw = (await aiCall('json', prompt)).replace(/```json|```/g, '').trim();
     const p = JSON.parse(raw);
     const type = p.type === 'event' ? 'event' : 'task';
     const preset = {
