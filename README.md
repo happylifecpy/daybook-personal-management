@@ -29,7 +29,7 @@
    │
    ├─ Firebase Authentication（Google 登入，取得 UID）
    ├─ Cloud Firestore   users/{uid}/items/{itemId}
-   └─ Firebase AI Logic → Gemini（gemini-2.5-flash）
+   └─ Firebase AI Logic → Gemini（gemini-3.8-flash）
 ```
 
 ### 資料模型 `users/{uid}/items/{itemId}`
