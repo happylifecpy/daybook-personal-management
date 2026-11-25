@@ -640,19 +640,19 @@ async function initAI(app) {
   try {
     const m = await import(`${FB}/firebase-ai.js`);
     const inst = m.getAI(app, { backend: new m.GoogleAIBackend() });
-    const make = model => ({ chat: m.getGenerativeModel(inst, { model, systemInstruction: SYS }), json: m.getGenerativeModel(inst, { model, generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }) });
-    ai = { models: [make(AI_MODEL), make(AI_FALLBACK)] };
+    const chat = (model, timeout) => m.getGenerativeModel(inst, { model, systemInstruction: SYS }, { timeout });
+    const json = (model, timeout) => m.getGenerativeModel(inst, { model, generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }, { timeout });
+    // 一句話新增只是解析格式：先用快速的 Flash-Lite；聊天建議用 Flash，逾時就換備援
+    ai = { chat: [chat(AI_MODEL, 20000), chat(AI_FALLBACK, 20000)], json: [json(AI_FALLBACK, 12000), json(AI_MODEL, 20000)] };
   } catch (e) { console.warn('AI Logic 無法載入', e); }
 }
-// 主模型忙碌（500/503/429）時自動重試一次，再改用備援模型
+// 依序嘗試模型：忙碌（500/503/429）或逾時就換下一個
 async function aiCall(kind, req) {
-  const busy = e => /\[(500|503|429)|high demand|overloaded|UNAVAILABLE|RESOURCE_EXHAUSTED/i.test(String(e?.message || e));
+  const retry = e => /\[(500|503|429)|high demand|overloaded|UNAVAILABLE|RESOURCE_EXHAUSTED|Deadline|timeout|timed out|abort/i.test(String(e?.message || e) + ' ' + (e?.name || ''));
   let last;
-  for (const [i, mdl] of ai.models.entries()) {
-    for (let t = 0; t < (i === 0 ? 2 : 1); t++) {
-      try { return (await mdl[kind].generateContent(req)).response.text(); }
-      catch (e) { last = e; if (!busy(e)) throw e; await new Promise(r => setTimeout(r, 1200)); }
-    }
+  for (const mdl of ai[kind]) {
+    try { return (await mdl.generateContent(req)).response.text(); }
+    catch (e) { last = e; if (!retry(e)) throw e; }
   }
   throw last;
 }
@@ -668,7 +668,7 @@ function aiErr(e) {
   const detail = `\n\n（錯誤代碼：${code || e?.code || '未知'}｜${s.replace(/https?:\/\/\S+/g, '').slice(0, 160)}）`;
   if (/app.?check/i.test(s)) return 'AI 請求被 App Check 擋下：請到 Firebase → App Check → API，把 Firebase AI Logic 設為「未強制執行」，等幾分鐘再試。' + detail;
   if (code === '429' || /quota|RESOURCE_EXHAUSTED/i.test(s)) return '目前 AI 使用量已達上限，請稍等一下再試。' + detail;
-  if (/high demand|overloaded|UNAVAILABLE/i.test(s) || code === '500' || code === '503') return 'Gemini 現在使用的人太多，有點塞車，過幾秒再按一次試試。' + detail;
+  if (/high demand|overloaded|UNAVAILABLE|Deadline|timeout|timed out|abort/i.test(s) || code === '500' || code === '503') return 'Gemini 現在使用的人太多，有點塞車，過幾秒再按一次試試。' + detail;
   if (/has not been used|is disabled|SERVICE_DISABLED|api-not-enabled/i.test(s)) return 'Firebase 專案的 AI Logic API 尚未啟用或剛啟用，請到 Firebase → AI Logic 確認，等幾分鐘再試。' + detail;
   if (/API_KEY|api key|referer|blocked/i.test(s)) return 'API 金鑰被限制，無法呼叫 AI Logic。請到 Google Cloud Console → API 和服務 → 憑證，檢查 Browser key 的 API 限制。' + detail;
   if (code === '404') return '找不到指定的 AI 模型。' + detail;
