@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// 日序 Daybook — Firestore 安全規則
+// 每位使用者只能讀寫自己 users/{uid}/items 底下的資料，其他一律拒絕。
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function validItem(itemId) {
+      let d = request.resource.data;
+      return d.id == itemId
+        && d.type in ['task', 'event']
+        && d.title is string && d.title.size() > 0 && d.title.size() <= 80
+        && d.date is string && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && (!('note' in d) || (d.note is string && d.note.size() <= 500))
+        && d.keys().size() <= 20;
+    }
+
+    match /users/{uid}/items/{itemId} {
+      allow read, delete: if signedIn(uid);
+      allow create, update: if signedIn(uid) && validItem(itemId);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
